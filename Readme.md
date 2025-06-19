@@ -166,7 +166,7 @@ sudo apt-mark hold kubelet kubeadm kubectl
 ### Step 2: Disable Swap
 ```bash
 sudo swapoff -a
-sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+sudo sed -i.bak '/\sswap\s/s/^/#/' /etc/fstab
 ```
 
 ### Step 3: Load containerd Modules
@@ -202,16 +202,34 @@ kubeadm config print init-defaults > kubeadm-config.yaml
 ```
 
 2. Edit `kubeadm-config.yaml`:
+In the cluster configuration, we would need to add the podSubnet configuration `10.244.0.0/16` as we are planning on using flannel. 
 ```yaml
-nodeRegistration:
-  criSocket: /run/containerd/containerd.sock
+---
+kind: ClusterConfiguration
+kubernetesVersion: "1.29.0"
+networking:
+  dnsDomain: cluster.local
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 10.244.0.0/16
+```
+In addition to this we would also need to add the following kubeletConfiguration configuration to ensure it is using systemd
+```yaml
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
 ```
+lastly, we would need to change the name in node to match the server name in the initconfiguration - in my case my server is called k8s-master. You can double check this in the `/etc/hosts` file. You would also need to change the advertise address from `1.2.3.4` to the ip address currently assigned to the control plane machine.
+```yaml
+---
+kind: InitConfiguration
+nodeRegistration:
+  name: k8s-master
+localAPIEndpoint:
+  advertiseAddress: 192.168.0.20
+```
 
-3. Initialize cluster:
+1. Initialize cluster:
 ```bash
 sudo kubeadm init --config kubeadm-config.yaml
 ```
@@ -221,7 +239,8 @@ sudo kubeadm init --config kubeadm-config.yaml
 sudo cat /var/lib/kubelet/config.yaml | grep cgroupDriver
 ```
 
-## Network Components Installation
+# At this point we no longer need to configure the worker nodes. The rest of the configuration are for the 
+## Network Components Installation 
 
 ### Installation of Flannel
 Flannel is a simple and efficient CNI (Container Network Interface) provider for Kubernetes.
@@ -243,13 +262,15 @@ helm install flannel --set podCidr="10.244.0.0/16" --namespace kube-flannel flan
 
 1. Verify Flannel installation:
 ```bash
-kubectl get pods -n kube-system | grep flannel
+kubectl get pods --all-namespaces | grep flannel
 ```
 
-1. Check network interfaces:
+2. Check network interfaces:
 ```bash
 ip a | grep flannel
 ```
+
+You may need some patience as the flannel containers/pods may take a moment to come online. 
 
 ### Installation of MetalLB
 MetalLB provides a network load-balancer implementation for Kubernetes clusters that do not run on a cloud provider.
@@ -259,12 +280,19 @@ MetalLB provides a network load-balancer implementation for Kubernetes clusters 
 kubectl create namespace metallb-system
 ```
 
-2. Apply MetalLB manifests:
+2. Create memberlist secret needed by MetalLB:
+```bash
+kubectl create secret generic -n metallb-system memberlist \
+  --from-literal=secretkey="$(openssl rand -base64 128)"
+
+```
+
+3. Apply MetalLB manifests:
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.7/config/manifests/metallb-native.yaml
 ```
 
-3. Wait for MetalLB pods to be ready:
+4. Wait for MetalLB pods to be ready:
 ```bash
 kubectl wait --namespace metallb-system \
                 --for=condition=ready pod \
@@ -272,7 +300,7 @@ kubectl wait --namespace metallb-system \
                 --timeout=90s
 ```
 
-4. Configure the IP address pool:
+5. Configure the IP address pool:
 ```yaml
 # Create a file named metallb-config.yaml
 apiVersion: metallb.io/v1beta1
@@ -291,12 +319,12 @@ metadata:
   namespace: metallb-system
 ```
 
-5. Apply the configuration:
+6. Apply the configuration:
 ```bash
 kubectl apply -f metallb-config.yaml
 ```
 
-6. Verify MetalLB installation:
+7. Verify MetalLB installation:
 ```bash
 kubectl get pods -n metallb-system
 ```
